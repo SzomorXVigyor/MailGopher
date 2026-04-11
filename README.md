@@ -15,14 +15,15 @@ A lightweight microservice for queuing and sending plain-text emails over SMTP, 
 
 The service is configured entirely via environment variables.
 
-| Variable        | Default | Description                                                                      |
-| --------------- | ------- | -------------------------------------------------------------------------------- |
-| `NAME`          | -       | Name of email sender (Global becase multiple address serve load balancing only ) |
-| `PORT`          | `8080`  | HTTP port to listen on.                                                          |
-| `LOG_LEVEL`     | `INFO`  | Log severity. Options: `DEBUG`, `INFO`, `WARN`, `ERROR`.                         |
-| `LOG_FORMAT`    | `json`  | Log output format. Options: `json`, `text`.                                      |
-| `MAX_RETRIES`   | `3`     | Number of times to retry a failed send before dropping the job.                  |
-| `SMTP_ACCOUNTS` | -       | **Required.** JSON array of SMTP account objects (see below).                    |
+| Variable            | Default | Description                                                                      |
+| ------------------- | ------- | -------------------------------------------------------------------------------- |
+| `NAME`              | -       | Name of email sender (Global becase multiple address serve load balancing only ) |
+| `PORT`              | `8080`  | HTTP port to listen on.                                                          |
+| `LOG_LEVEL`         | `INFO`  | Log severity. Options: `DEBUG`, `INFO`, `WARN`, `ERROR`.                         |
+| `LOG_FORMAT`        | `json`  | Log output format. Options: `json`, `text`.                                      |
+| `MAX_RETRIES`       | `3`     | Number of times to retry a failed send before dropping the job.                  |
+| `SMTP_ACCOUNTS`     | -       | **Required.** JSON array of SMTP account objects (see below).                    |
+| `WORKER_QUEUE_SIZE` | `100`   | Number of jobs that can be buffered in each worker's queue before backpressure.  |
 
 ### SMTP Account Object
 
@@ -42,6 +43,7 @@ export NAME="Email service"
 export LOG_FORMAT=text
 export LOG_LEVEL=DEBUG
 export MAX_RETRIES=5
+export WORKER_QUEUE_SIZE=100
 export SMTP_ACCOUNTS='[
   {
     "host": "smtp.gmail.com",
@@ -95,12 +97,13 @@ Queues an email for sending. Each address in `destination` is enqueued as a sepa
 go build -o mailgopher
 ./mailgopher
 ```
+
 ### Docker
 
 ```bash
 docker build -t mailgopher .
 docker run -d -p 8080:8080 --env-file .env mailgopher
-``` 
+```
 
 ## Release
 

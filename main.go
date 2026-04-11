@@ -187,22 +187,28 @@ func main() {
 
 	slog.Info("Configuration loaded", "max_retries", maxRetries, "account_count", len(accounts))
 
-	// Divide the total queue capacity evenly across accounts so the aggregate
-	// buffer remains ~5000 regardless of how many accounts are configured.
-	perQueueSize := 5000 / len(accounts)
-	if perQueueSize < 1 {
-		perQueueSize = 1
+	workerQueueSize := os.Getenv("WORKER_QUEUE_SIZE")
+	if workerQueueSize == "" {
+		workerQueueSize = "100"
+	}
+	queueSize, err := strconv.Atoi(workerQueueSize)
+	if err != nil {
+		slog.Error("Invalid WORKER_QUEUE_SIZE value", "error", err)
+		os.Exit(1)
+	}
+	if queueSize < 1 {
+		queueSize = 1
 	}
 
 	workers = make([]*workerHandle, len(accounts))
 	for i, acc := range accounts {
 		h := &workerHandle{
-			queue: make(chan EmailJob, perQueueSize),
+			queue: make(chan EmailJob, queueSize),
 			user:  acc.User,
 		}
 		workers[i] = h
 		go worker(acc, h)
-		slog.Info("Started worker", "user", acc.User, "limit_per_hour", acc.LimitPerHour, "queue_size", perQueueSize)
+		slog.Info("Started worker", "user", acc.User, "limit_per_hour", acc.LimitPerHour, "queue_size", queueSize)
 	}
 
 	mux := http.NewServeMux()
