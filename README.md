@@ -15,13 +15,14 @@ A lightweight microservice for queuing and sending plain-text emails over SMTP, 
 
 The service is configured entirely via environment variables.
 
-| Variable        | Default | Description                                                     |
-| --------------- | ------- | --------------------------------------------------------------- |
-| `PORT`          | `8080`  | HTTP port to listen on.                                         |
-| `LOG_LEVEL`     | `INFO`  | Log severity. Options: `DEBUG`, `INFO`, `WARN`, `ERROR`.        |
-| `LOG_FORMAT`    | `json`  | Log output format. Options: `json`, `text`.                     |
-| `MAX_RETRIES`   | `3`     | Number of times to retry a failed send before dropping the job. |
-| `SMTP_ACCOUNTS` | -       | **Required.** JSON array of SMTP account objects (see below).   |
+| Variable        | Default | Description                                                                      |
+| --------------- | ------- | -------------------------------------------------------------------------------- |
+| `NAME`          | -       | Name of email sender (Global becase multiple address serve load balancing only ) |
+| `PORT`          | `8080`  | HTTP port to listen on.                                                          |
+| `LOG_LEVEL`     | `INFO`  | Log severity. Options: `DEBUG`, `INFO`, `WARN`, `ERROR`.                         |
+| `LOG_FORMAT`    | `json`  | Log output format. Options: `json`, `text`.                                      |
+| `MAX_RETRIES`   | `3`     | Number of times to retry a failed send before dropping the job.                  |
+| `SMTP_ACCOUNTS` | -       | **Required.** JSON array of SMTP account objects (see below).                    |
 
 ### SMTP Account Object
 
@@ -37,6 +38,7 @@ The service is configured entirely via environment variables.
 ### Example - Envs
 
 ```bash
+export NAME="Email service"
 export LOG_FORMAT=text
 export LOG_LEVEL=DEBUG
 export MAX_RETRIES=5
@@ -70,9 +72,9 @@ Queues an email for sending. Each address in `destination` is enqueued as a sepa
 
 ```json
 {
-    "destination": ["user1@example.com", "user2@example.com"],
-    "subject": "System Alert",
-    "content": "This is a plain text notification."
+	"destination": ["user1@example.com", "user2@example.com"],
+	"subject": "System Alert",
+	"content": "This is a plain text notification."
 }
 ```
 
@@ -84,3 +86,26 @@ Queues an email for sending. Each address in `destination` is enqueued as a sepa
 | `400 Bad Request`         | Invalid JSON or one or more required fields are missing.                         |
 | `405 Method Not Allowed`  | Request method was not POST.                                                     |
 | `503 Service Unavailable` | A worker queue is full. Total buffer is ~5000 jobs split evenly across accounts. |
+
+## Build & Run
+
+### Local
+
+```bash
+go build -o mailgopher
+./mailgopher
+```
+### Docker
+
+```bash
+docker build -t mailgopher .
+docker run -d -p 8080:8080 --env-file .env mailgopher
+``` 
+
+## Release
+
+Releases are tagged from the `main` branch and auto published on Github Registry as Docker images. To create a new release:
+
+1. Commit the change and push to `main`.
+2. Create a new tag matching the version (e.g. `git tag v1.0.0`).
+3. Push the tag to trigger the release workflow (e.g. `git push origin v1.0.0`).

@@ -403,8 +403,13 @@ func sendEmail(acc SMTPAccount, job EmailJob) error {
 		return fmt.Errorf("invalid SMTP port %q: %w", acc.Port, err)
 	}
 
+	name := os.Getenv("NAME")
+	if name == "" {
+		name = acc.User
+	}
+
 	m := gomail.NewMessage()
-	m.SetHeader("From", m.FormatAddress(acc.User, "Service"))
+	m.SetHeader("From", m.FormatAddress(acc.User, name))
 	m.SetHeader("To", job.To)
 	m.SetHeader("Subject", job.Subject)
 	m.SetBody("text/plain", job.Content)
