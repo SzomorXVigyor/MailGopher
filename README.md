@@ -89,6 +89,16 @@ Queues an email for sending. Each address in `destination` is enqueued as a sepa
 | `405 Method Not Allowed`  | Request method was not POST.                                                     |
 | `503 Service Unavailable` | A worker queue is full. Total buffer is ~5000 jobs split evenly across accounts. |
 
+### GET /health
+
+Returns a simple service is running indicator.
+
+**Responses**
+
+| Status   | Meaning                                  |
+| -------- | ---------------------------------------- |
+| `200 OK` | Service is healthy. Response body: `ok`. |
+
 ## Build & Run
 
 ### Local

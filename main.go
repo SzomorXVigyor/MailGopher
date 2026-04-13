@@ -213,6 +213,10 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/send", handleSend)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok\n"))
+	})
 
 	port := os.Getenv("PORT")
 	if port == "" {
