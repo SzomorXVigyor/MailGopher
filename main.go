@@ -83,7 +83,8 @@ type SMTPAccount struct {
 	Pass string `json:"pass"`
 
 	// LimitPerHour is the maximum number of emails this account may send per
-	// hour. The worker derived from this account will pace itself accordingly.
+	// hour (must be >= 1). The worker derived from this account paces itself
+	// accordingly while allowing an immediate first send when idle.
 	LimitPerHour int `json:"limit_per_hour"`
 
 	// SSL controls whether the connection is opened with implicit TLS (true)
@@ -98,8 +99,8 @@ type SMTPAccount struct {
 // separately throughout the codebase and makes shutdown logic self-contained.
 type workerHandle struct {
 	// queue is the dedicated, bounded channel through which jobs are delivered
-	// to this worker. It is closed during graceful shutdown to signal the
-	// worker goroutine to drain and exit.
+	// to this worker. It is intentionally never closed so in-flight retries
+	// during graceful shutdown can re-enqueue safely without panicking.
 	queue chan EmailJob
 
 	// wg counts jobs that have been accepted into the queue but not yet
@@ -123,6 +124,13 @@ var robin atomic.Uint64
 // maxRetries is the number of times a failed send is retried before the job
 // is permanently dropped. It is set once during startup from MAX_RETRIES.
 var maxRetries int
+
+// sendEmailFn points to the SMTP delivery implementation; overridden in tests.
+var sendEmailFn = sendEmail
+
+// rateWindow is the pacing window used to derive per-send intervals from
+// LimitPerHour (1 hour in production; overridable in unit tests).
+var rateWindow = time.Hour
 
 // setupLogger initialises the global slog logger from LOG_LEVEL and LOG_FORMAT
 // environment variables. It must be called before any other logging takes place.
@@ -153,6 +161,30 @@ func setupLogger() {
 	slog.SetDefault(slog.New(handler))
 }
 
+// validateAccounts checks that at least one SMTP account is configured and
+// every account has valid connection details and a positive hourly rate limit.
+func validateAccounts(accounts []SMTPAccount) error {
+	if len(accounts) == 0 {
+		return fmt.Errorf("no SMTP accounts configured")
+	}
+	for i, acc := range accounts {
+		if strings.TrimSpace(acc.Host) == "" {
+			return fmt.Errorf("account[%d]: host is required", i)
+		}
+		port, err := strconv.Atoi(acc.Port)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("account[%d] (%s): invalid port %q", i, acc.User, acc.Port)
+		}
+		if strings.TrimSpace(acc.User) == "" {
+			return fmt.Errorf("account[%d]: user is required", i)
+		}
+		if acc.LimitPerHour < 1 {
+			return fmt.Errorf("account[%d] (%s): limit_per_hour must be >= 1, got %d", i, acc.User, acc.LimitPerHour)
+		}
+	}
+	return nil
+}
+
 // main is the service entry point. It parses configuration, starts one worker
 // goroutine per SMTP account, starts the HTTP server, and blocks until a
 // SIGTERM or SIGINT is received. On shutdown it drains all queues before
@@ -171,8 +203,8 @@ func main() {
 		slog.Error("Failed to parse SMTP_ACCOUNTS JSON", "error", err)
 		os.Exit(1)
 	}
-	if len(accounts) == 0 {
-		slog.Error("No SMTP accounts configured")
+	if err := validateAccounts(accounts); err != nil {
+		slog.Error("Invalid SMTP_ACCOUNTS configuration", "error", err)
 		os.Exit(1)
 	}
 
@@ -200,6 +232,9 @@ func main() {
 		queueSize = 1
 	}
 
+	shutdownCh := make(chan struct{})
+	var workersDone sync.WaitGroup
+
 	workers = make([]*workerHandle, len(accounts))
 	for i, acc := range accounts {
 		h := &workerHandle{
@@ -207,7 +242,11 @@ func main() {
 			user:  acc.User,
 		}
 		workers[i] = h
-		go worker(acc, h)
+		workersDone.Add(1)
+		go func(acc SMTPAccount, h *workerHandle) {
+			defer workersDone.Done()
+			worker(acc, h, shutdownCh)
+		}(acc, h)
 		slog.Info("Started worker", "user", acc.User, "limit_per_hour", acc.LimitPerHour, "queue_size", queueSize)
 	}
 
@@ -247,16 +286,15 @@ func main() {
 		slog.Error("HTTP server shutdown error", "error", err)
 	}
 
-	// Closing each channel signals the corresponding worker goroutine to exit
-	// its range loop once the queue is fully drained.
-	for _, h := range workers {
-		close(h.queue)
-	}
+	// Signal workers to exit once their queues are empty. Keeping h.queue open
+	// ensures in-flight retries can safely re-enqueue without panicking.
+	close(shutdownCh)
 
 	slog.Info("HTTP server stopped. Waiting for all per-worker queues to drain...")
 	for _, h := range workers {
 		h.wg.Wait()
 	}
+	workersDone.Wait()
 	slog.Info("All queued emails processed. Service exiting gracefully.")
 }
 
@@ -273,12 +311,13 @@ func dispatch(req EmailJob) bool {
 	start := robin.Add(1) - 1
 	for i := uint64(0); i < n; i++ {
 		h := workers[(start+i)%n]
+		h.wg.Add(1)
 		select {
 		case h.queue <- req:
-			h.wg.Add(1)
 			return true
 		default:
-			// This worker's queue is full; fall through to try the next one.
+			// This worker's queue is full; revert WaitGroup and try the next one.
+			h.wg.Done()
 		}
 	}
 	return false
@@ -336,26 +375,49 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 }
 
 // worker is the per-account send loop. It exclusively consumes jobs from
-// h.queue and paces each send attempt with a time.Ticker derived from
-// acc.LimitPerHour, ensuring the hourly rate limit is never exceeded.
+// h.queue and paces consecutive sends using a burst-1 interval derived from
+// acc.LimitPerHour: an idle worker sends the first email immediately, and
+// subsequent sends wait until the per-email interval has elapsed.
 //
 // On send failure the job's RetriesLeft counter is decremented and the job is
 // re-enqueued into the same worker's queue via a non-blocking select so that
-// retry attempts consume budget from the correct account. If the queue is full
-// at retry time, or if RetriesLeft reaches zero, the job is permanently
-// dropped and h.wg.Done is called.
+// retry attempts consume budget from the correct account. Because h.queue is
+// never closed, retries during shutdown never panic.
 //
-// worker exits cleanly when h.queue is closed (during graceful shutdown) after
-// the range loop finishes draining all remaining jobs.
-func worker(acc SMTPAccount, h *workerHandle) {
-	interval := time.Hour / time.Duration(acc.LimitPerHour)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+// worker exits cleanly once shutdownCh is closed and h.queue is drained.
+func worker(acc SMTPAccount, h *workerHandle, shutdownCh <-chan struct{}) {
+	interval := rateWindow / time.Duration(acc.LimitPerHour)
+	var nextAllowed time.Time
 
-	for job := range h.queue {
-		<-ticker.C
+	for {
+		var job EmailJob
+		// Prioritize draining queued jobs before checking shutdownCh.
+		select {
+		case j := <-h.queue:
+			job = j
+		default:
+			select {
+			case j := <-h.queue:
+				job = j
+			case <-shutdownCh:
+				select {
+				case j := <-h.queue:
+					job = j
+				default:
+					return
+				}
+			}
+		}
 
-		err := sendEmail(acc, job)
+		if !nextAllowed.IsZero() {
+			if wait := time.Until(nextAllowed); wait > 0 {
+				timer := time.NewTimer(wait)
+				<-timer.C
+			}
+		}
+		nextAllowed = time.Now().Add(interval)
+
+		err := sendEmailFn(acc, job)
 		if err != nil {
 			job.RetriesLeft--
 			if job.RetriesLeft > 0 {
@@ -369,7 +431,7 @@ func worker(acc SMTPAccount, h *workerHandle) {
 				case h.queue <- job:
 					// Re-queued successfully; WaitGroup counter remains open.
 				default:
-					// Queue is full or closed during shutdown — drop the job.
+					// Queue is full — drop the job.
 					slog.Error("Could not requeue email, dropping",
 						"worker", acc.User,
 						"subject", job.Subject,
@@ -396,7 +458,7 @@ func worker(acc SMTPAccount, h *workerHandle) {
 // sendEmail constructs a gomail message from job and delivers it through the
 // SMTP credentials in acc using a fresh connection per call.
 //
-// job.Destination is always a single address (guaranteed by the fan-out in
+// job.To is always a single address (guaranteed by the fan-out in
 // [handleSend]), set directly as the To header so the remote SMTP server
 // counts it as exactly one outgoing email.
 //

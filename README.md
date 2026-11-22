@@ -6,7 +6,7 @@ A lightweight microservice for queuing and sending plain-text emails over SMTP, 
 
 - **Per-recipient sending:** each address in a request is dispatched as its own individual job so the remote SMTP server counts every send exactly once, avoiding inflated outgoing counts from BCC grouping.
 - **Per-account worker queues:** every configured SMTP account gets its own dedicated goroutine and bounded queue. Jobs are distributed via round-robin dispatch, so rate limits are deterministic and accounts never compete for the same channel.
-- **Strict per-account hourly rate limiting:** each worker paces sends using a ticker derived from `limit_per_hour`, spacing outgoing traffic evenly over the hour.
+- **Strict per-account hourly rate limiting:** each worker paces consecutive sends using an interval derived from `limit_per_hour` (must be `>= 1`), sending the first email immediately when idle and spacing subsequent bursts evenly over the hour.
 - **SSL / STARTTLS support:** each account can independently use implicit TLS (port 465) or STARTTLS (port 587).
 - **Automatic retry:** failed deliveries are re-queued into the same worker's queue and retried up to `MAX_RETRIES` times before being permanently dropped.
 - **Graceful shutdown:** on SIGTERM/SIGINT the HTTP listener closes first (no new requests accepted), then the service waits for every queued and in-flight job to finish before exiting.
